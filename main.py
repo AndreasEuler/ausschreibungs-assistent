@@ -1,65 +1,73 @@
+
+
 from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+import openai
 import os
-from openai import OpenAI
-from playwright.sync_api import sync_playwright
+import pymysql
 from datetime import datetime
+from playwright.async_api import async_playwright
+import asyncio
 
 app = FastAPI()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# OpenAI Setup
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-@app.get("/ausschreibungen/")
-def get_ausschreibungen(frage: str = Query(...)):
-    prompt = f"Welche öffentlichen Ausschreibungen könnten zur folgenden Beschreibung passen: {frage}?"
-    try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        antwort = response.choices[0].message.content
-        return JSONResponse(content={"antwort": antwort}, media_type="application/json; charset=utf-8")
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, media_type="application/json; charset=utf-8")
+# DB-Verbindung
+def get_db_connection():
+    return pymysql.connect(
+        host="mariadb106",
+        user="db278740_40",
+        password="Wk729:hNbjzq",
+        database="db278740_40",
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor
+    )
+
+# Scraper für Brandenburg
+async def scrape_vergabemarktplatz(query: str):
+    results = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto("https://vergabemarktplatz.brandenburg.de")
+        await page.fill("input[type='search']", query)
+        await page.keyboard.press("Enter")
+        await page.wait_for_timeout(5000)
+        items = await page.query_selector_all(".search-hit-entry-title a")
+        for item in items[:5]:
+            title = await item.inner_text()
+            item_href = await item.get_attribute("href")
+            results.append((title.strip(), f"https://vergabemarktplatz.brandenburg.de{item_href}", "Beschreibung fehlt"))
+        await browser.close()
+    return results
 
 @app.get("/scrape/")
-def scrape_evergabe(query: str = "app entwicklung", max_results: int = 5):
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto("https://www.evergabe-online.de/")
-            page.wait_for_load_state("networkidle")
+async def scrape(query: str = Query(..., description="Suchbegriff zur Ausschreibung")):
+    entries = await scrape_vergabemarktplatz(query)
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        for titel, link, beschreibung in entries:
+            cursor.execute(
+                "INSERT INTO ausschreibungen (titel, beschreibung, link, quelle, zeitpunkt) VALUES (%s, %s, %s, %s, %s)",
+                (titel, beschreibung, link, "brandenburg", datetime.now())
+            )
+    conn.commit()
+    conn.close()
+    return {"eingetragene_eintraege": len(entries)}
 
-            # Cookie-Banner akzeptieren, wenn vorhanden
-            try:
-                page.click("text=Akzeptieren", timeout=3000)
-            except:
-                pass
+@app.get("/query/")
+def query(frage: str = Query(..., description="Was soll GPT aus der Datenbank filtern?")):
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT * FROM ausschreibungen ORDER BY zeitpunkt DESC LIMIT 10")
+        results = cursor.fetchall()
+    conn.close()
 
-            # Robusterer Selektor verwenden
-            page.wait_for_selector("input[type='search']", timeout=10000)
-            page.fill("input[type='search']", query)
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(5000)
-
-            results = page.query_selector_all("article.search-result")
-            data = []
-            for result in results[:max_results]:
-                title_el = result.query_selector("h3 a")
-                if not title_el:
-                    continue
-                title = title_el.inner_text()
-                link = title_el.get_attribute("href")
-                beschreibung = result.inner_text().split("\n")[1] if "\n" in result.inner_text() else ""
-                data.append({
-                    "titel": title.strip(),
-                    "link": "https://www.evergabe-online.de" + link.strip(),
-                    "beschreibung": beschreibung.strip(),
-                    "abgerufen_am": datetime.now().isoformat()
-                })
-
-            browser.close()
-            return JSONResponse(content={"ergebnisse": data}, media_type="application/json; charset=utf-8")
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, media_type="application/json; charset=utf-8")
+    prompt = f"Hier sind die letzten 10 Ausschreibungen: {results}. Welche passen zu: '{frage}'?"
+    completion = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    antwort = completion.choices[0].message["content"]
+    return {"antwort": antwort}
