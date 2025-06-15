@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse
 import os
 from openai import OpenAI
 
@@ -12,12 +13,12 @@ def get_ausschreibungen(frage: str = Query(..., description="Worum soll es bei d
 
     try:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-3.5-turbo",  # oder gpt-4o, falls verfügbar
             messages=[
                 {"role": "user", "content": prompt}
             ]
         )
         antwort = response.choices[0].message.content
-        return {"antwort": antwort}
+        return JSONResponse(content={"antwort": antwort}, media_type="application/json; charset=utf-8")
     except Exception as e:
-        return {"error": str(e)}
+        return JSONResponse(content={"error": str(e)}, media_type="application/json; charset=utf-8")
