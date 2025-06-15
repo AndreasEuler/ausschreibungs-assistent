@@ -1,0 +1,2 @@
+# ausschreibungs-assistent
+Ausschreibungs AI
