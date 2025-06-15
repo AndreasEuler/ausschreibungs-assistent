@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 import os
@@ -30,16 +29,28 @@ def scrape_evergabe(query: str = "app entwicklung", max_results: int = 5):
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             page.goto("https://www.evergabe-online.de/")
+            page.wait_for_load_state("networkidle")
 
-            page.fill('input[aria-label="Suchbegriff"]', query)
+            # Cookie-Banner akzeptieren, wenn vorhanden
+            try:
+                page.click("text=Akzeptieren", timeout=3000)
+            except:
+                pass
+
+            # Robusterer Selektor verwenden
+            page.wait_for_selector("input[type='search']", timeout=10000)
+            page.fill("input[type='search']", query)
             page.keyboard.press("Enter")
             page.wait_for_timeout(5000)
 
             results = page.query_selector_all("article.search-result")
             data = []
             for result in results[:max_results]:
-                title = result.query_selector("h3 a").inner_text()
-                link = result.query_selector("h3 a").get_attribute("href")
+                title_el = result.query_selector("h3 a")
+                if not title_el:
+                    continue
+                title = title_el.inner_text()
+                link = title_el.get_attribute("href")
                 beschreibung = result.inner_text().split("\n")[1] if "\n" in result.inner_text() else ""
                 data.append({
                     "titel": title.strip(),
